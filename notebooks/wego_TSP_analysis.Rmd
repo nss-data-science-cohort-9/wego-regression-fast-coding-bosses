@@ -1,0 +1,62 @@
+---
+#WeGo TSP Project 
+#Main question: Does TSP reduce the probablility that a bus leaves a stop late?
+---
+  
+#TSP can be on, off, or on/off with conditions
+
+#TSP on 
+#TSP conditionCall
+#TSP off
+#TSP on unconditional
+#TSP priority on/off only headway 
+
+#Main Tasklist 
+#* Create the categorical column based on the TSP day setStatus
+#* Exploration -> What other factors should be considered?
+ # * each person with their own factor 
+#____
+#* Data Analysis -> From the TSP category, run a model -> test first question 
+#* Follow up data analysis:
+  #* Analyze other factors, including headway
+
+  
+------
+  #Step 1: Load in data 
+  
+  
+FILTER CRITERIA: 1) TIME/DATE, 2) Route portion (CH46, 28&CHARL, MCC5_1)
+
+TSP condition column: on/off (0/1)
+TSP off= Anything before 02-03-2025 is TSP OFF
+TSP on= 2025-02-03 12pm to 2025-02-10 12pm 
+TSP ON [schedlue Cond]= 2025-02-10 12 pm to 2025-04-28
+TSP OFF= 2025-04-28 12pm to 2025-05-05 12pm 
+TSP ON= 2025-05-05 12pm to 2025-05-12 at 12pm
+TSP on [headway cond]= 2025-05-12 12pm to CURRENT/LAST DATE
+
+
+Strategy: use the case_when function 
+https://www.rdocumentation.org/packages/dplyr/versions/1.0.10/topics/case_when
+
+lubridate: helpgul for date-and-time conversions (https://rstudio.github.io/cheatsheets/html/lubridate.html)
+  
+```{r}
+library(tidyverse)
+
+wego <- read_csv("../data/Route 50 Timepoint and Headway Data, 1-1-2023 through 5-12-2025.csv")
+wego|> head()
+
+wego |>slice_max(DATE)
+
+
+#define the dates
+
+wego
+
+#case_when to filter out the on/off flags for TSP dates and times 
+
+##library lubridate that might be helpful with date-and-time 
+
+
+```
