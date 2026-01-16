@@ -24,6 +24,11 @@ library(lubridate)
 
 wego <- read_csv("../data/Route 50 Timepoint and Headway Data, 1-1-2023 through 5-12-2025.csv")
 ```
+
+```{r}
+glimpse(wego)
+```
+
 ```{r}
 wego |> 
   filter(CALENDAR_ID == 120230101) |> 
@@ -32,10 +37,26 @@ wego |>
 
 ```
 
+```{r}
+wego_time_point_filter <- wego |> 
+  group_by(CALENDAR_ID,TRIP_ID) |> 
+  filter(all (c("WHBG", "MCC5_1") %in% TIME_POINT_ABBR)) |> #keep the group only if the both stops exist
+  filter(
+    ROUTE_STOP_SEQUENCE >= min(ROUTE_STOP_SEQUENCE[TIME_POINT_ABBR %in% c("WHBG", "MCC5_1")]) & #TIME_POINT_ABBR %in% c("WHBG", "MCC5_2") crates a logical vector (true,false) for each group Route_stop_seq with brackets selects the values where the condition is true.
+    ROUTE_STOP_SEQUENCE <= max(ROUTE_STOP_SEQUENCE[TIME_POINT_ABBR %in% c("WHBG", "MCC5_1")])
+  ) |> 
+  
+  filter(!(TIME_POINT_ABBR == "WHBG"  & ROUTE_DIRECTION_NAME == "TO DOWNTOWN"), #excluding the "WHBG" while going "To Downtown"
+         !(TIME_POINT_ABBR == "MCC5_1" & ROUTE_DIRECTION_NAME == "FROM DOWNTOWN"))  #excluding the "MCC5_2" while "FROM Downtown"
+
+```
+			
+
+
 
 # Combining date and scheduled time into a single column
 ```{r}
-wego <- wego |> 
+wego_time_point_filter <- wego_time_point_filter |> 
   filter((!is.na(DATE)) & (!is.na(SCHEDULED_TIME))) |> 
   mutate(
     sched_time_clean = str_extract(SCHEDULED_TIME, "\\d{2}:\\d{2}:\\d{2}"),  #extract hms from SCHEDULED_TIME
@@ -50,31 +71,27 @@ wego <- wego |>
 ```{r}
 #TSP on= 2025-02-03 12pm to 2025-02-10 12pm (unconditional)
 
- wego |> 
-   filter(datetime>="2025-02-03 12:00:00" & datetime <= "2025-02-10 12:00:00") |>  
-   filter(TIME_POINT_ABBR %in% c("CH46", "28&CHARL", "MCC5_1")) 
+ wego_time_point_filter |> 
+   filter(datetime>="2025-02-03 12:00:00" & datetime <= "2025-02-10 12:00:00") 
 ```
 
 ```{r}
 #TSP ON [schedlue Cond]= 2025-02-10 12 pm to 2025-04-28 TSP  Priority Begins (Only buses more than 2 minutes late receive priority)
 
- wego |>
+wego_time_point_filter |>
   
-  filter((datetime>="2025-02-10 12:00:00") & (datetime <= "2025-04-28 12:00:00")) |> 
-  filter(TIME_POINT_ABBR %in% c("CH46", "28&CHARL", "MCC5_1")) |> 
+  filter((datetime>"2025-02-10 12:00:00") & (datetime <= "2025-04-28 12:00:00")) |> 
   filter(ADHERENCE<=-2) #filters for more than 2 mins late
   
-
-
 ```
 
 
 ```{r}
 #TSP OFF= 2025-04-28 12pm to 2025-05-05 12pm
 
-wego |>
+wego_time_point_filter |>
   
-  filter((datetime>="2025-04-28 12:00:00") & (datetime <= "2025-05-05 12:00:00"))
+  filter((datetime>"2025-04-28 12:00:00") & (datetime <= "2025-05-05 12:00:00"))
 
 
 
@@ -86,9 +103,9 @@ wego |>
 #TSP ON= 2025-05-05 12pm to 2025-05-12 at 12pm
 
 
-wego |>
+wego_time_point_filter |>
   
-  filter((datetime>="2025-05-05 12:00:00") & (datetime <= "2025-05-12 12:00:00")) |> 
+  filter((datetime>"2025-05-05 12:00:00") & (datetime <= "2025-05-12 12:00:00")) |> 
   filter(TIME_POINT_ABBR %in% c("CH46", "28&CHARL", "MCC5_1"))
 
 
@@ -100,24 +117,53 @@ wego |>
 #TSP on [headway cond]= 2025-05-12 12pm to CURRENT/LAST DATE
 #TSP Headway-Conditional TSP Priority Begins (Only gapped buses with actual leading headway more than 120% of scheduled headway receive priority)
 
-wego |> 
+ wego_time_point_filter <- wego_time_point_filter |> 
+   mutate(HDWY_DEV_Perc = HDWY_DEV/SCHEDULED_HDWY * 100) 
+  
+  
+```
+
+```{r}
+ wego_time_point_filter |> 
   filter(!is.na(HDWY_DEV), !is.na(SCHEDULED_HDWY)) |> 
-  filter((HDWY_DEV>0) & (SCHEDULED_HDWY !=0))|>   #filters for gapping (more hdwy than scheduled) and filter scheduled hdwy to not zero since it gives infinity values while calculating the hdwy percentage 
-  mutate(HDWY_DEV_Perc = HDWY_DEV/SCHEDULED_HDWY * 100) |> 
-  filter(datetime>="2025-05-12 12:00:00") |> 
+  filter((HDWY_DEV>0) & (SCHEDULED_HDWY !=0))|>   #filters for gapping (more hdwy than scheduled) and filter scheduled hdwy to not zero since it gives infinity values while calculating the hdwy percentage
+  filter(datetime>"2025-05-12 12:00:00") |>
   filter(HDWY_DEV_Perc > 120)
 ```
 
 
+
 ```{r}
-wego |> 
+wego_time_point_filter |> 
   mutate(
     tsp_categorical_variable = case_when(
-     datetime>=as.POSIXct("2025-02-03 12:00:00") & datetime <= as.POSIXct("2025-02-10 12:00:00") & #datetime column is already of class POSIXct so we have to convert string "2025-02-03 12:00:00" to POSIXct or it would run an error (POSIXct is the standard “seconds since 1970-01-01 UTC” representation.)
-     TIME_POINT_ABBR %in% c("CH46", "28&CHARL", "MCC5_1") ~ 1,
-      TRUE ~ 0)
-  ) |> 
- filter(tsp_categorical_variable==1)
+      
+    #TSP on= 2025-02-03 12pm to 2025-02-10 12pm (unconditional)
+     datetime>("2025-02-03 12:00:00")& datetime <= ("2025-02-10 12:00:00") ~ 1, #datetime column is already of class POSIXct so we have to convert string "2025-02-03 12:00:00" to POSIXct or it would run an error (POSIXct is the standard “seconds since 1970-01-01 UTC” representation.)
+     
+     
+#TSP ON [schedlue Cond]= 2025-02-10 12 pm to 2025-04-28 TSP  Priority Begins (Only buses more than 2 minutes late receive priority)
+
+    datetime>("2025-02-10 12:00:00") & datetime <= ("2025-04-28 12:00:00") &
+    ADHERENCE<=-2 ~ 1, #filters for more than 2 mins late
+
+
+#TSP OFF= 2025-04-28 12pm to 2025-05-05 12pm
+    datetime>("2025-04-28 12:00:00") & datetime <= ("2025-05-05 12:00:00") ~ 0,
+
+
+#TSP ON= 2025-05-05 12pm to 2025-05-12 at 12pm
+   datetime>("2025-05-05 12:00:00") & datetime <= ("2025-05-12 12:00:00") &
+   TIME_POINT_ABBR %in% c("CH46", "28&CHARL", "MCC5_1")  ~ 1,
+
+
+#TSP on [headway cond]= 2025-05-12 12pm to CURRENT/LAST DATE
+#TSP Headway-Conditional TSP Priority Begins (Only gapped buses with actual leading headway more than 120% of scheduled headway receive priority) 
+  datetime>("2025-05-12 12:00:00") & (HDWY_DEV>0) & (SCHEDULED_HDWY !=0) & #filters for gapping (more hdwy than scheduled) and filter scheduled hdwy to not zero since it gives infinity values while calculating the hdwy percentage
+  HDWY_DEV_Perc > 120 ~ 1, |> 
+  
+  TRUE ~ 0)
+  ) 
 
 ```
 
