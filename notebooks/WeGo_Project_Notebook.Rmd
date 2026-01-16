@@ -1,0 +1,207 @@
+---
+title: "WeGo Project Notebook"
+output: html_notebook
+---
+
+In this project, we will be analyzing WeGo Public Transit data for trips on Route 50, Charlotte Pike. TSP has been used on portions of this route, with different periods of being on or off, either conditionally or unconditionally, , which creates a real-world “natural experiment.” The main research question we are seeking to address is: "Does Transit Signal Priority (TSP) reduce the probability that a bus leaves a stop late?"
+
+```{r}
+library(tidyverse)
+library(lubridate)
+```
+
+```{r}
+wego <- read_csv("../data/Route 50 Timepoint and Headway Data, 1-1-2023 through 5-12-2025.csv")
+
+wego |> head(5)
+```
+```{r}
+beginning_rows <- nrow(wego)
+```
+
+Dropping any rows that have missing values for either ACTUAL_ARRIVAL_TIME or ACTUAL_DEPARTURE_TIME
+```{r}
+wego <- wego |>
+  filter(!is.na(ACTUAL_ARRIVAL_TIME) & !is.na(ACTUAL_DEPARTURE_TIME))
+
+ending_rows <- nrow(wego)
+```
+
+```{r}
+paste('We retain', round(100*ending_rows/beginning_rows, digits=2),'% of the data after filtering out any rows that have missing values for either ACTUAL_ARRIVAL_TIME or ACTUAL_DEPARTURE_TIME.')
+```
+
+
+The important dates involving TSP are as follows (all are in 2025):
+
+*    February 3rd @ 12 noon: TSP Turned On (Unconditional)
+*    February 10th @ 12 noon: TSP Schedule-Conditional Priority Begins (Only buses more than 2 minutes late receive priority)
+*    April 28th @ 12 noon: TSP Turned Off
+*    May 5th @ 12 noon: TSP Turned On (Unconditional)
+*    May 12th @ 12 noon: TSP Headway-Conditional TSP Priority Begins (Only gapped buses with actual leading headway more than 120% of scheduled headway receive priority)
+
+We will convert these significant TSP dates into time intervals/timestamps for ease of filtering later.
+```{r}
+unconditional_1_start <- ymd_hms("2025-02-03 12:00:00", tz = "America/Chicago")
+unconditional_1_end <- ymd_hms("2025-02-10 11:59:59", tz = "America/Chicago")
+unconditional_1_interval <- interval(unconditional_1_start, unconditional_1_end)
+
+schedule_conditional_start <- ymd_hms("2025-02-10 12:00:00", tz = "America/Chicago")
+schedule_conditional_end <- ymd_hms("2025-04-28 11:59:59", tz = "America/Chicago") 
+schedule_conditional_interval <- interval(schedule_conditional_start, schedule_conditional_end)
+
+off_intermediate_start <- ymd_hms("2025-04-28 12:00:00", tz = "America/Chicago")
+off_intermediate_end <- ymd_hms("2025-05-05 11:59:59", tz = "America/Chicago")
+off_intermediate_interval <- interval(off_intermediate_start, unconditional_2_start)
+
+unconditional_2_start <- ymd_hms("2025-05-05 12:00:00", tz = "America/Chicago")
+unconditional_2_end <- ymd_hms("2025-05-12 11:59:59", tz = "America/Chicago")
+unconditional_2_interval <- interval(unconditional_2_start, headway_conditional_start)
+
+headway_conditional_start <- ymd_hms("2025-05-12 12:00:00", tz = "America/Chicago")
+# Headway-conditional TSP continues from this timestamp through the end of the dataset
+```
+
+
+We will create categorical variables to capture when TSP was in effect:
+
+*    The TSP_ELIGIBLE column is a precursor column that indicates whether or not the stop (TIME_POINT_ABBR) is eligible for TSP (i.e. if it is between White Bridge and MCC). It contains a 1 if the stop is eligible for TSP, and a 0 otherwise.
+*    The TSP_ON column will have a 1 if the ride had TSP turned on for the duration of the ride, a 0 if the ride had TSP turned off for the duration of the ride, and NA if TSP was not applicable (either the stop was not included in the TSP experiment or the stop was the first on the ride). A ride benefits from TSP if one of the following is true:
+**   TSP is turned on unconditionally
+**   TSP is turned on in the 'SCHEDULE CONDITIONAL' capacity and the bus is more than 2 minutes late departing
+**   TSP is turned on in the 'HEADWAY CONDITIONAL' capacity and the bus is gapped with actual leading headway more than 120% of scheduled headway
+
+
+First we will create the TSP_ELIGIBLE column. We'll look at the distinct TIME_POINT_ABBR values in our dataset:
+```{r}
+wego |>
+  distinct(TIME_POINT_ABBR)
+```
+We can use the WeGo route documentation to look at the order of stops on route 50 (https://www.wegotransit.com/ride/maps-schedules/bus/50-charlotte-pike/). We know that TSP was only used between the White Bridge and MCC stops. Based on the map, we can see that this encompasses all of the stops on route 50 except for Walmart and Annex Station. 
+
+Now we have to determine which TIME_POINT_ABBR values correspond with which stops.
+
+With direction "To Downtown", the order of the stops is as follows (https://www.wegotransit.com/ride/maps-schedules/bus/50-charlotte-pike/?dir=1&d=1%2F14%2F2026&IncludeNonTimepointStops=n):
+HEAD MIDDLE SCHOOL
+CENTRAL 4TH AVE - BAY 20
+MARTIN LUTHER KING SCHOOL IB
+CENTRAL 5TH AVE - BAY 11
+CENTRAL 4TH AVE - BAY 14
+CENTRAL 4TH AVE - BAY 13
+WALMART
+ANNEX STATION INBOUND
+WHITE BRIDGE STATION INBOUND
+46TH AVE/RICHLAND PARK STATION INBOUND
+28TH/31ST AVE CONNECTOR STATION INBOUND
+CENTRAL 5TH AVE - BAY 1
+
+With direction "From Downtown", the order of the stops is this (https://www.wegotransit.com/ride/maps-schedules/bus/50-charlotte-pike/?dir=0&d=1%2F14%2F2026&IncludeNonTimepointStops=n):
+CENTRAL 5TH AVE - BAY 6
+MARTIN LUTHER KING SCHOOL
+CENTRAL 5TH AVE - BAY 2
+MARTIN LUTHER KING SCHOOL
+HEAD MIDDLE SCHOOL
+CENTRAL 5TH AVE - BAY 1
+28TH/31ST AVE CONNECTOR STATION OUTBOUND
+46TH AVE/RICHLAND PARK STATION OUTBOUND
+WHITE BRIDGE STATION OUTBOUND
+ANNEX STATION OUTBOUND
+WALMART
+
+We can match up the abbreviations as follows, using some of the routes in our data (shown below) to corroborate:
+WALM = WALMART				
+HLWD = ANNEX STATION INBOUND				
+WHBG = WHITE BRIDGE STATION 			
+CH46 = 46TH AVE/RICHLAND PARK STATION				
+28&CHARL = 28TH/31ST AVE CONNECTOR STATION				
+MCC5_1 = CENTRAL 5TH AVE - BAY 1		
+MLKS = MARTIN LUTHER KING SCHOOL				
+MCC4_13	= CENTRAL 4TH AVE - BAY 13			
+MCC5_2 = CENTRAL 5TH AVE - BAY 2			
+HEAD = HEAD MIDDLE SCHOOL
+MCC4_22	= CENTRAL 4TH AVE - BAY 22			
+MCC4_20	= CENTRAL 4TH AVE - BAY 20			
+MCC5_11	= CENTRAL 5TH AVE - BAY 11			
+MCC4_14 = CENTRAL 4TH AVE - BAY 14
+
+```{r}
+wego |>
+  arrange(CALENDAR_ID,TRIP_ID,ACTUAL_ARRIVAL_TIME) |>
+  select(DATE, CALENDAR_ID, TRIP_ID, ROUTE_ABBR, TIME_POINT_ABBR, TRIP_EDGE, SCHEDULED_TIME, ROUTE_DIRECTION_NAME)
+```
+Now we can build the TSP_ELIGIBLE column. The WALMART (WALM) and ANNEX STATION (HLWD) stops will have a value of 0, since they were completely excluded from TSP. The WHITE BRIDGE STATION (WHBG) stop will have a value of 1 if the route is "FROM DOWNTOWN", but a value of 0 if the route is "TO DOWNTOWN", since in that case the route segments leading up to that stop did not have TSP.
+
+```{r}
+wego <- wego |>
+  group_by(CALENDAR_ID, TRIP_ID) |>
+  mutate(
+    TSP_ELIGIBLE = if_else(
+       (ROUTE_DIRECTION_NAME == 'TO DOWNTOWN' & TIME_POINT_ABBR == 'WHBG') | (TIME_POINT_ABBR %in% c('WALM','HLWD')), 0, 1
+    )
+  ) |>
+  ungroup()
+```
+
+When filtering on dates/times for the TSP_ON column, we will need to look at the actual departure date from the previous stop. This is because in order to consider unconditional TSP in effect for a given stop, we need to ensure it was turned on for the entire trip leading up to that stop (i.e. the actual departure time from the previous stop up to the actual arrival time at the current stop).
+
+Thus, we will add a new column to the dataframe, containing the actual departure time from the last stop. 
+```{r}
+# Add a column with the actual departure time from the last stop 
+wego <- wego |>
+  group_by(CALENDAR_ID,TRIP_ID) |>
+  arrange(ACTUAL_ARRIVAL_TIME, .by_group = TRUE) |>
+  mutate(DEP_FROM_PREV_STOP = lag(ACTUAL_DEPARTURE_TIME, n = 1)) |>
+  ungroup()
+```
+
+Finally we will convert the ACTUAL_ARRIVAL_TIME and DEP_FROM_PREV_STOP columns to a date/timestamp (by concatenating them with the DATE column and then converting to a datetime datatype), since we will be doing time comparisons in our subsequent column mutations.
+
+```{r}
+# Currently in-progress
+wego <- wego |>
+  unite("ACTUAL_ARRIVAL_DATETIME", DATE, ACTUAL_ARRIVAL_TIME, remove = FALSE, sep = " ") |>
+  mutate(ACTUAL_ARRIVAL_DATETIME = ymd_hms(ACTUAL_ARRIVAL_DATETIME, tz = "America/Chicago"))
+```
+
+```{r}
+wego |>
+  head(2)
+```
+
+```{r}
+wego <- wego |>
+  unite("DEP_PREV_STOP_DATETIME", DATE, DEP_FROM_PREV_STOP, remove = FALSE, sep = " ") |>
+  mutate(DEP_PREV_STOP_DATETIME = ymd_hms(DEP_PREV_STOP_DATETIME, tz = "America/Chicago"))
+```
+
+Now we can create the TSP_ON column by filtering on TSP_ELIGIBLE and whether both the departure time from the last stop and arrival time at the current stop are within any of the TSP unconditional time frames. In addition, for any rows that represent the beginning of a trip, we will automatically mark TSP_UNCONDITIONAL as 0, since the first leg of each trip will not benefit from TSP.
+```{r}
+# Creating TSP_UNCONDITIONAL column
+wego <- wego |>
+  mutate(
+    TSP_ON = case_when(
+      # If the stop is outside the scope of TSP or if it is the first stop in the trip, TSP is not applicable
+      TSP_ELIGIBLE == 0 | TRIP_EDGE == 1 ~ NA,
+      # Unconditional TSP:
+      TSP_ELIGIBLE == 1 & DEP_PREV_STOP_DATETIME %within% unconditional_1_interval & ACTUAL_ARRIVAL_DATETIME %within% unconditional_1_interval ~ 1,
+      TSP_ELIGIBLE == 1 & DEP_PREV_STOP_DATETIME %within% unconditional_2_interval & ACTUAL_ARRIVAL_DATETIME %within% unconditional_2_interval ~ 1,
+      # Schedule-Conditional TSP (only buses more than 2 minutes late receive priority):
+      TSP_ELIGIBLE == 1 & DEP_PREV_STOP_DATETIME %within% schedule_conditional_interval & ACTUAL_ARRIVAL_DATETIME %within% schedule_conditional_interval & ADHERENCE > 2 ~ 1,
+      # Headway-Conditional TSP (only gapped buses with actual leading headway more than 120% of scheduled headway receive priority):
+      TSP_ELIGIBLE == 1 & DEP_PREV_STOP_DATETIME >= headway_conditional_start & HDWY_DEV > 0 & ACTUAL_HDWY / SCHEDULED_HDWY > 1.2 ~ 1,
+      .default = 0
+    )
+  )
+```
+
+```{r}
+wego |>
+  tail(5) |>
+  select(ACTUAL_ARRIVAL_DATETIME, DEP_PREV_STOP_DATETIME, ROUTE_DIRECTION_NAME, TIME_POINT_ABBR, TRIP_EDGE, TSP_ON)
+```
+
+Next we will create other categorical variables for day of the week, time of day, time of year (school in session or not), etc.
+```{r}
+
+```
+
