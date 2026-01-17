@@ -1,0 +1,315 @@
+---
+#WeGo TSP Project 
+#
+---
+**Main question: Does TSP reduce the probability that a bus leaves a stop late?** 
+
+FILTER CRITERIA: 1) TIME/DATE, 2) Route portion (CH46, 28&CHARL, MCC5_1)
+
+**TSP condition column: on/off (0/1)**
+TSP off= Anything before 02-03-2025 is TSP OFF
+TSP on= 2025-02-03 12pm to 2025-02-10 12pm 
+TSP ON [schedlue Cond]= 2025-02-10 12 pm to 2025-04-28
+** TSP Schedule-Conditional Priority Begins (Only buses more than 2 minutes late receive priority)
+TSP OFF= 2025-04-28 12pm to 2025-05-05 12pm 
+TSP ON= 2025-05-05 12pm to 2025-05-12 at 12pm
+TSP on [headway cond]= 2025-05-12 12pm to CURRENT/LAST DATE
+**TSP Headway-Conditional TSP Priority Begins (Only gapped buses with actual leading headway more than 120% of scheduled headway receive priority)
+
+Strategy: use the case_when function 
+https://www.rdocumentation.org/packages/dplyr/versions/1.0.10/topics/case_when
+
+lubridate: helpful for date-and-time conversions (https://rstudio.github.io/cheatsheets/html/lubridate.html)
+  
+```{r}
+#load in libraries 
+library(tidyverse)
+library(lubridate)
+
+#load in data
+wego <- read_csv("../data/Route 50 Timepoint and Headway Data, 1-1-2023 through 5-12-2025.csv")
+
+#view data
+wego|> head()
+
+#view the route stop options to determine TSP filter criteria
+wego |> distinct(TIME_POINT_ABBR)
+
+```
+```{r}
+#Create a timestamp column that combines the date and scheduled time, then make it a datetime object
+wego <- wego |> 
+  mutate(timestamp = paste(DATE, SCHEDULED_TIME), 
+                       .before = DATE) |>
+  mutate(timestamp = ymd_hms(timestamp))
+
+#view the final dataframe 
+wego |> head(3)
+
+```
+Use the date and time criteria to filter the wego dataset, and create a column with 0/1 flag is TSP is used for that specific row 
+
+```{r}
+## create a column with the headway calculations (used in the headway conditional fitlter)
+wego <- wego |> mutate(pc_hdwy_calc = HDWY_DEV/SCHEDULED_HDWY, .before = HDWY_DEV)
+
+#Create a tsp-on column using case_when to filter on the specific dates and routes
+wego_tsp <- wego |> 
+  mutate(tsp_on= case_when( 
+    #First unconditional day with TSP on 
+    between(timestamp, ymd_hms("2025-02-03 12:00:00"), ymd_hms("2025-02-10 12:00:00")) & 
+      TIME_POINT_ABBR %in% c('CH46', '28&CHARL', 'MCC5_1') ~ 1,
+    #Unconditional day- add additional filter if adherence > 2 (more than 2 minutes late)
+    between(timestamp, ymd_hms("2025-02-10 12:00:00"),ymd_hms("2025-04-28 12:00:00")) &
+      TIME_POINT_ABBR %in% c('CH46', '28&CHARL', 'MCC5_1') & 
+      (ADHERENCE <= -2)~ 1,
+    #Second unconditional day
+    between(timestamp, ymd_hms("2025-05-05 12:00:00"),ymd_hms("2025-05-12 12:00:00")) &
+      TIME_POINT_ABBR %in% c('CH46', '28&CHARL', 'MCC5_1') ~ 1,
+    #conditional day- only bus where headway percent is greater than 120%
+    timestamp >= ymd_hms("2025-05-12 12:00:00") &
+      TIME_POINT_ABBR %in% c('CH46', '28&CHARL', 'MCC5_1') & 
+      (pc_hdwy_calc >= 0.2) ~ 1,
+    #All other days are considered non-TSP days 
+    .default = 0),
+    
+    #Place the new columns as the first in the dataframe for easier viewing
+    .before = CALENDAR_ID
+  )
+
+#Count how many tsp-on days were flagged to compare effectiveness of filtering to group members
+num_total_tsp_flag <- wego_tsp |> 
+  filter(tsp_on == 1) |> 
+  nrow()
+
+paste("After filtering, there are ", num_total_tsp_flag, " trips where TSP was used")
+
+```
+Add an additonal column for model- was the TSP on, conditional, or unconditional? 
+Add a column: 0= TSP off, 1= TSP unconditional, 2= TSP conditional
+```{r}
+## create a column with the headway calculations (used in the headway conditional fitlter)
+wego <- wego |> mutate(pc_hdwy_calc = HDWY_DEV/SCHEDULED_HDWY, .before = HDWY_DEV)
+
+#Create a tsp-on column using case_when to filter on the specific dates and routes
+wego_tsp <- wego_tsp |> 
+  mutate(tsp_cond_status= case_when( 
+    #First unconditional day with TSP on 
+    between(timestamp, ymd_hms("2025-02-03 12:00:00"), ymd_hms("2025-02-10 12:00:00")) & 
+      TIME_POINT_ABBR %in% c('CH46', '28&CHARL', 'MCC5_1') ~ 1,
+    #Unconditional day- add additional filter if adherence > 2 (more than 2 minutes late)
+    between(timestamp, ymd_hms("2025-02-10 12:00:00"),ymd_hms("2025-04-28 12:00:00")) &
+      TIME_POINT_ABBR %in% c('CH46', '28&CHARL', 'MCC5_1') & 
+      (ADHERENCE <= -2)~ 2,
+    #Second unconditional day
+    between(timestamp, ymd_hms("2025-05-05 12:00:00"),ymd_hms("2025-05-12 12:00:00")) &
+      TIME_POINT_ABBR %in% c('CH46', '28&CHARL', 'MCC5_1') ~ 1,
+    #conditional day- only bus where headway percent is greater than 120%
+    timestamp >= ymd_hms("2025-05-12 12:00:00") &
+      TIME_POINT_ABBR %in% c('CH46', '28&CHARL', 'MCC5_1') & 
+      (pc_hdwy_calc >= 0.2) ~ 2,
+    #All other days are considered non-TSP days 
+    .default = 0),
+    
+    #Place the new columns as the first in the dataframe for easier viewing
+    .before = CALENDAR_ID
+  )
+
+wego_tsp
+```
+**Creating the model for probability calculations**
+Does TSP reduce the probability that a bus leaves a stop late?
+
+With a tsp column, we can use that as a variable for a logistical regression. The main model questions would be if the TSP_on being used will predict/impact the bus being late to the stop.
+
+The model will have these structures: 
+1) TSP_on having 0 or 1 (was tsp on or off)
+2) Was the bus late (ADJUSTED_LATE_COUNT)
+3) Additional variables 
+
+First general model: 
+target variable = Adjusted_late_count, 
+predictor variable = tsp on or off
+
+Result -> probability that the TSP on/off changed bus being late 
+
+Second models: refining comparrison criteria 
+* When looking at just the tsp on/off on the same days - portions of the route off vs on 
+* looksing at previous history- the same route stops that could have tsp on but (historically/conditionally) they were off 
+* accounting for additional factors like time of day, day of week, etc that could impact the model 
+
+```{r}
+#quick dataframe reference
+wego_tsp|> head(2)
+
+```
+
+Question: Does TSP on/off (conditional/unconditional pooled) predict the amount of time (adherence)
+```{r}
+
+## Creating the first general model -> LOGISTICAL
+#target = ADHERENCE (how early/late the bus from the previous stop)
+#predictor = tsp on/off
+
+tsp_late_model_general <- glm(ADHERENCE~ tsp_on, 
+                  data=wego_tsp)
+
+summary(tsp_late_model_general)
+
+```
+
+``` {r}
+#create a quick visual 
+
+ggplot(data=wego_tsp,
+       aes(x=tsp_on, y=ADHERENCE)
+       )+
+  geom_point() +
+  geom_smooth(method = "lm") + 
+  labs(title= "Does TSP use impact bus lateness?", 
+       x="TSP status", 
+       y="Adherence")
+
+```
+Adherence does not answer our question- instead we need to look at the adjusted_late_count. So, first let us group by a variable to get total percent of buses that were late each day. 
+
+Grouping 1: What was the percent of late bus arrivals each day, and was this day a TSP on/off day?
+
+```{r}
+#Group each date for comparrison 
+#First get the info on the percent of buses that were late on that date 
+group_late_date <- 
+  wego_tsp |> 
+  group_by(DATE) |> 
+  summarise(pc_late = mean( ADJUSTED_LATE_COUNT))
+
+#Then count the total number of rows that had tsp on 
+tsp_count_col<- 
+  wego_tsp |> 
+  group_by(DATE) |> 
+  summarize(tsp_on_count = sum(tsp_on))
+
+#Also count the total number of rows that were conditional or not 
+tsp_cond_count_col <- 
+  wego_tsp |> 
+  group_by(DATE) |> 
+  summarize(tsp_cond_count = max(tsp_cond_status)) #pull out the max number from this column
+
+#compile the list together using merge funciton for graphing 
+group_date_tsp_data <- inner_join(
+  group_late_date, 
+  tsp_count_col, 
+  by= 'DATE')
+group_date_tsp_data <- inner_join(
+  group_date_tsp_data, 
+  tsp_cond_count_col, 
+  by= 'DATE')
+
+#visualize the resulting dataframe 
+group_date_tsp_data
+```
+
+```{r}
+
+#create a quick visual graph
+ggplot(data=group_date_tsp_data,
+       aes(x=tsp_on_count, 
+           y=pc_late, 
+           color=tsp_cond_count)
+       )+
+  geom_point() +
+  #geom_smooth(method = "lm") +
+  labs(title= "Does number of TSP stops improve percent of buses late?",
+       x="number TSP on stops",
+       y="percent of buses that arrived late")
+
+```
+I will remove the TSP=0 days, since it has wide variety. And instead look at the linear relationship between number of TSP stops and percent of late counts for that day 
+
+```{r}
+
+#remove the tsp count = 0 days 
+date_late_count_group_dropzero <- group_date_tsp_data |> filter(tsp_on_count > 0) 
+
+# 
+#create a quick visual graph
+ggplot(data=date_late_count_group_dropzero,
+       aes(x=tsp_on_count, 
+           y=pc_late, 
+           color=tsp_cond_count)
+       )+
+  geom_point() +
+  #Add the linear regression line for visual
+  geom_smooth(method = "lm") + 
+  labs(title= "Does number of TSP stops improve percent of buses late?",
+       x="number TSP on stops",
+       y="percent of buses that arrived late", 
+       colors="Conditional status")
+
+```
+** Note on analysis: This is not showing what I originally thought**
+Essentially it is showing that on conditional days (light blue), the TSP was triggered more because they buses were running late. So the relationship of TSP improving bus timeliness is not explicit, but rather that the conditional TSP settings is working as expected. I will need to restructure my data and question to answer the ACTUAL relationship question of the effectivness of TSP. Likely by comparing at the route or date month level.
+**
+
+Run A linear regression -> 
+target= percent of late buses each day 
+predictor = number of tsp stops
+predictor 2 = conditional or not 
+
+```{r}
+date_late_count_group_dropzero |> distinct(tsp_cond_count)
+
+# 
+# ## Make the conditional into a factor for model and graphing 
+# date_late_count_group_dropzero$tsp_cond_count <- factor(date_late_count_group_dropzero$tsp_cond_count, 
+#                                                         levels= c(1,2),
+#                                                         labels = c(0, 1)
+#                                                         )
+date_late_count_group_dropzero
+
+# #run a linear regression with the variables
+# group_date_late_cond_model <- lm(pc_late~ tsp_on_count + tsp_cond_count,
+#                   data=date_late_count_group_dropzero)
+# 
+# summary(group_date_late_cond_model)
+```
+
+What if we just look at the conditional/unconditional differences? Does that improve the adherence predictibility?
+
+```{r}
+# wego_tsp |> head()
+```
+
+```{r}
+## Aditional model-> create conditional tsp column as a categorical variable in the model 
+
+# # #optional setup= need to make it a factor (from titanic warmup exercise?)
+# 
+# wego_tsp$tsp_cond_status <- factor(
+#   wego_tsp$tsp_cond_status, 
+#   levels = c("off", "conditional", "unconditional"), 
+#   labels = c(0, 1, 2))
+# 
+# 
+# # 
+# tsp_late_model_conditional <- glm(ADHERENCE~ tsp_on + tsp_cond_status,
+#                   data=wego_tsp, 
+#                   family= "binomial")
+# 
+# summary(tsp_late_model_conditional)
+# 
+# # 
+# # #create a quick visual
+# # 
+# # ggplot(data=wego_tsp,
+# #        aes(x=tsp_cond_status, y=ADHERENCE)
+# #        )+
+# #   geom_point() +
+# #   #geom_smooth(method = "lm") +
+# #   labs(title= "Does TSP use impact bus lateness?",
+# #        x="TSP condiitonal status",
+# #        y="Adherence")
+# 
+# 
+# wego_tsp
+```
