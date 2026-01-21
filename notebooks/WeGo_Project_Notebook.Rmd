@@ -3,7 +3,7 @@ title: "WeGo Project Notebook"
 output: html_notebook
 ---
 
-In this project, we will be analyzing WeGo Public Transit data for trips on Route 50, Charlotte Pike. TSP has been used on portions of this route, with different periods of being on or off, either conditionally or unconditionally, , which creates a real-world “natural experiment.” The main research question we are seeking to address is: "Does Transit Signal Priority (TSP) reduce the probability that a bus leaves a stop late?"
+In this project, we will be analyzing WeGo Public Transit data for trips on Route 50, Charlotte Pike. TSP has been used on portions of this route, with different periods of being on or off, either conditionally or unconditionally, which creates a real-world “natural experiment.” The main research question we are seeking to address is: "Does Transit Signal Priority (TSP) reduce the probability that a bus leaves a stop late?"
 
 As an ancillary research question, we will examine the effect of TSP on headway, which is the amount of time between a bus and the prior bus at the same stop.
 ```{r}
@@ -18,6 +18,7 @@ library(tidyverse)
 library(lubridate)
 library(ggplot2)
 library(broom)
+library(stats)
 ```
 
 # Initial data load --------------------------------------------------------------------------------------
@@ -168,7 +169,7 @@ wego <- wego |>
 
 Now we can create TSP related columns by filtering on TSP_ELIGIBLE and whether both the departure time from the last stop and arrival time at the current stop are within a TSP time frame. In addition, we mark TSP as NA for any stops that were completely excluded from TSP.
 
-First we will create a TSP_ON column that contains a 1 if the ride had TSP turned on for it, and a 0 otherwise. As a stretch question, we can examine the effect on subsequent adherence or headway if TSP is triggered.
+First we will create a TSP_ON column that contains a 1 if the ride was within a TSP phase (either unconditional or conditional), and a 0 otherwise.
 
 ```{r}
 # Creating TSP_ON column
@@ -183,18 +184,21 @@ wego <- wego |>
       TRIP_EDGE == 1 & ACTUAL_ARRIVAL_DATETIME %within% unconditional_1_interval ~ 1,
       TRIP_EDGE == 1 & ACTUAL_ARRIVAL_DATETIME %within% unconditional_2_interval ~ 1,
       # Meets Schedule-Conditional TSP criteria (only buses more than 2 minutes late receive priority):
-      TRIP_EDGE == 1 & ACTUAL_ARRIVAL_DATETIME %within% schedule_conditional_interval & ADHERENCE < -2 ~ 1,
+      TRIP_EDGE == 1 & ACTUAL_ARRIVAL_DATETIME %within% schedule_conditional_interval #& ADHERENCE < -2 
+      ~ 1,
       
       # Otherwise, look at ACTUAL_ARRIVAL_DATETIME and DEP_PREV_STOP_DATETIME:
       # Unconditional TSP:
       DEP_PREV_STOP_DATETIME %within% unconditional_1_interval & ACTUAL_ARRIVAL_DATETIME %within% unconditional_1_interval ~ 1,
       DEP_PREV_STOP_DATETIME %within% unconditional_2_interval & ACTUAL_ARRIVAL_DATETIME %within% unconditional_2_interval ~ 1,
       # Meets Schedule-Conditional TSP criteria (only buses more than 2 minutes late receive priority):
-      DEP_PREV_STOP_DATETIME %within% schedule_conditional_interval & ACTUAL_ARRIVAL_DATETIME %within% schedule_conditional_interval & ADHERENCE < -2 ~ 1,
+      DEP_PREV_STOP_DATETIME %within% schedule_conditional_interval & ACTUAL_ARRIVAL_DATETIME %within% schedule_conditional_interval #& ADHERENCE < -2 
+      ~ 1,
       
       # With headway conditional, we only need to look at DEP_PREV_STOP_DATETIME:
       # Meets Headway-Conditional TSP criteria (only gapped buses with actual leading headway more than 120% of scheduled headway receive priority):
-      DEP_PREV_STOP_DATETIME >= headway_conditional_start & HDWY_DEV > 0 & ACTUAL_HDWY / SCHEDULED_HDWY > 1.2 ~ 1,
+      DEP_PREV_STOP_DATETIME >= headway_conditional_start #& HDWY_DEV > 0 & ACTUAL_HDWY / SCHEDULED_HDWY > 1.2 
+      ~ 1,
       .default = 0
     )
   )
@@ -318,7 +322,7 @@ wego |>
 ```
 ```{r}
 unacceptable_dev = wego |>
-  filter(!is.na(ACCEPTABLE_HDWY)) |>
+  filter(!is.na(UNACCEPTABLE_HDWY)) |>
   summarize(round(100*mean(UNACCEPTABLE_HDWY),digits=4)) |>
   pull()
 
@@ -385,18 +389,25 @@ wego$UNACCEPTABLE_HDWY <- factor(wego$UNACCEPTABLE_HDWY,
 ```
 
 ```{r}
-wego |>
+headway_by_tsp <- wego |>
   filter(!is.na(UNACCEPTABLE_HDWY)) |>
   pivot_longer(cols=(contains('TSP') & !contains('_ON') & !contains('_ELIGIBLE')), names_to='TSP_Type', values_to='ENABLED') |>
   filter(ENABLED==1) |>
   mutate(TSP_Type = factor(TSP_Type, levels=c('TSP_OFF','TSP_SCHED_COND','TSP_HEAD_COND','TSP_UNCOND'), labels=c('TSP Off', 'TSP Schedule-Conditional', 'TSP Headway-Conditional', 'TSP Unconditional'))) |>
   ggplot(aes(x=TSP_Type, fill=UNACCEPTABLE_HDWY)) +
   geom_bar(position='fill') +
+  theme(axis.text.y = element_text(angle = 45, vjust = 0.5, hjust = 1)) + 
   coord_flip() +
   labs(title = "Frequency of Excessive Headway by TSP Status",
        subtitle = "For WeGo Bus Rides, 1/1/2023 - 5/12/2025",
-  y = "Proportion of Rides with Excessive Headway", x = "TSP Type")
+  y = "Proportion", x = "TSP Type", fill = "Headway Status")
+
+headway_by_tsp
+
+ggsave("headway_by_tsp.png", plot = headway_by_tsp, width = 6, height = 4, units = "in")
 ```
+
+
 ```{r, fig.width=18, fig.height=6}
 wego |>
   filter(!is.na(UNACCEPTABLE_HDWY)) |>
@@ -412,6 +423,55 @@ wego |>
        subtitle = "For WeGo Bus Rides, 1/1/2023 - 5/12/2025",
   y = "Late Status", x = "TSP Type")
 ```
+
+We will explore whether headway is affected by day of week, time of day, or time of year.
+```{r}
+headway_by_weekday <- wego |>
+  filter(!is.na(UNACCEPTABLE_HDWY)) |>
+  ggplot(aes(x=DAY_OF_WEEK, fill=UNACCEPTABLE_HDWY)) +
+  geom_bar(position='fill') +
+  coord_flip() +
+  labs(title = "Frequency of Excessive Headway by Day of Week",
+       subtitle = "For WeGo Bus Rides, 1/1/2023 - 5/12/2025",
+  y = "Proportion", x = "Day of Week", fill = "Headway Status")
+
+headway_by_weekday
+
+ggsave("headway_by_weekday.png", plot = headway_by_weekday, width = 6, height = 4, units = "in")
+```
+
+
+```{r}
+headway_by_timeofday <- wego |>
+  filter(!is.na(UNACCEPTABLE_HDWY)) |>
+  ggplot(aes(x=TIME_OF_DAY, fill=UNACCEPTABLE_HDWY)) +
+  geom_bar(position='fill') +
+  coord_flip() +
+  labs(title = "Frequency of Excessive Headway by Time of Day",
+       subtitle = "For WeGo Bus Rides, 1/1/2023 - 5/12/2025",
+  y = "Proportion", x = "Time of Day", fill = "Headway Status")
+
+headway_by_timeofday
+
+ggsave("headway_by_timeofday.png", plot = headway_by_timeofday, width = 6, height = 4, units = "in")
+```
+
+
+```{r}
+headway_by_schoolstatus <- wego |>
+  filter(!is.na(UNACCEPTABLE_HDWY)) |>
+  ggplot(aes(x=SCHOOL_IN_SESSION, fill=UNACCEPTABLE_HDWY)) +
+  geom_bar(position='fill') +
+  coord_flip() +
+  labs(title = "Frequency of Excessive Headway by In-School Status",
+       subtitle = "For WeGo Bus Rides, 1/1/2023 - 5/12/2025",
+  y = "Proportion", x = "School Status", fill = "Headway Status")
+
+headway_by_schoolstatus
+
+ggsave("headway_by_schoolstatus.png", plot = headway_by_schoolstatus, width = 6, height = 4, units = "in")
+```
+It appears that time of day has the greatest variation in headway. We'll incorporate that into our model.
 
 # Statistical Models --------------------------------------------------------------------------------------------------------
 
@@ -429,9 +489,7 @@ lateness_tsp_model <- glm(ADJUSTED_LATE_COUNT ~ TSP_Type,
 
 summary(lateness_tsp_model)
 ```
-The coefficient for all 3 TSP types is negative, which indicates that each type of TSP reduces the likelihood that a ride will be late. However, the coefficient for TSP off is also negative, suggesting that turning TSP off also reduces the likelihood that a ride will be late. 
-
-Using alpha=0.05, the coefficients for TSP unconditional and TSP headway-conditional are statistically significant. 
+The coefficient for all 3 TSP types is negative, which indicates that each type of TSP reduces the likelihood that a ride will be late.
 
 ```{r}
 pred_data_lateness_tsp_model = tibble(TSP_Type=c('TSP Off', 'TSP Schedule-Conditional', 'TSP Unconditional', 'TSP Headway-Conditional'))
@@ -455,55 +513,25 @@ pred_data_lateness_tsp_model |>
 ```
 
 Let's see how adding explanatory variables for day of week, time of day, and time of year changes the model.
-```{r}
-lateness_timeofday_tsp_model <- glm(ADJUSTED_LATE_COUNT ~ TSP_Type + TIME_OF_DAY,
-  data = tsp_lateness_model_data,
-  family = "binomial"
-)
 
-summary(lateness_timeofday_tsp_model)
-```
-```{r}
-ggpredict(lateness_timeofday_tsp_model, terms = c('TSP_Type','TIME_OF_DAY'))
-```
-
-
-```{r}
-lateness_weekday_tsp_model <- glm(ADJUSTED_LATE_COUNT ~ TSP_Type + DAY_OF_WEEK,
-  data = tsp_lateness_model_data,
-  family = "binomial"
-)
-
-summary(lateness_weekday_tsp_model)
-```
-```{r}
-ggpredict(lateness_weekday_tsp_model, terms = c('TSP_Type','DAY_OF_WEEK'))
-```
-
-
-```{r}
-lateness_school_tsp_model <- glm(ADJUSTED_LATE_COUNT ~ TSP_Type + SCHOOL_IN_SESSION,
-  data = tsp_lateness_model_data,
-  family = "binomial"
-)
-
-summary(lateness_school_tsp_model)
-```
-```{r}
-ggpredict(lateness_school_tsp_model, terms = c('TSP_Type','SCHOOL_IN_SESSION'))
-```
 ```{r}
 lateness_everything_tsp_model <- glm(ADJUSTED_LATE_COUNT ~ TSP_Type + TIME_OF_DAY + SCHOOL_IN_SESSION + DAY_OF_WEEK,
   data = tsp_lateness_model_data,
   family = "binomial"
 )
 
-summary(lateness_everything_tsp_model)
+AIC(lateness_everything_tsp_model)
 ```
+```{r}
+# Applying Bonferroni correction
+lateness_everything_tsp_model_coefficients <- tidy(lateness_everything_tsp_model) |>
+ mutate(p.value = p.adjust(p.value, method = "bonferroni"))
+lateness_everything_tsp_model_coefficients
+```
+
+
 # Take e to the power of the coefficient to obtain the odds ratio
 ```{r}
-lateness_everything_tsp_model_coefficients <- tidy(lateness_everything_tsp_model)
-
 sched_cond_coef <- lateness_everything_tsp_model_coefficients |> filter(term=='TSP_TypeTSP Schedule-Conditional') |> select(estimate) |> pull()
 hdwy_cond_coef <- lateness_everything_tsp_model_coefficients |> filter(term=='TSP_TypeTSP Headway-Conditional') |> select(estimate) |> pull()
 uncond_coef <- lateness_everything_tsp_model_coefficients |> filter(term=='TSP_TypeTSP Unconditional') |> select(estimate) |> pull()
@@ -512,9 +540,9 @@ sched_cond_odds_ratio <- exp(sched_cond_coef)
 hdwy_cond_odds_ratio <- exp(hdwy_cond_coef)
 uncond_odds_ratio <- exp(uncond_coef)
 
-paste('Unconditional TSP reduces thd odds of a bus being late by a factor of',round(uncond_odds_ratio, digits=3))
-paste('Schedule-conditional TSP reduces thd odds of a bus being late by a factor of',round(sched_cond_odds_ratio, digits=3))
-paste('Headway-conditional TSP reduces thd odds of a bus being late by a factor of',round(hdwy_cond_odds_ratio, digits=3))
+paste('Unconditional TSP reduces the odds of a bus being late by a factor of',round(uncond_odds_ratio, digits=3))
+paste('Schedule-conditional TSP reduces the odds of a bus being late by a factor of',round(sched_cond_odds_ratio, digits=3))
+paste('Headway-conditional TSP reduces the odds of a bus being late by a factor of',round(hdwy_cond_odds_ratio, digits=3))
 
 ```
 We see that headway-conditional TSP has the greatest reduction of the odds of a bus being late, after controlling for day of week, time of day, and whether or not school is in session. 
@@ -522,11 +550,10 @@ We see that headway-conditional TSP has the greatest reduction of the odds of a 
 ```{r}
 ggpredict(lateness_everything_tsp_model, terms = c('TSP_Type', 'TIME_OF_DAY','SCHOOL_IN_SESSION','DAY_OF_WEEK'))
 ```
-When we incorporate day of the week, time of year, and whether or not school is in session, we see some interesting results. TSP Headway-Conditional, of all the TSP types, has the greatest influence on lowering the probability that a bus will be late. 
 
+-----------------------------------------------------------------------------------------------------------
+Next we'll create a logistic regression model to examine the effects of the various types of TSP on ride headway.
 
-
-Next we'll create a logistic regression model to examine the effects of the various types of TSP on headway.
 ```{r}
 tsp_hdwy_model_data <- wego |>
   filter(!is.na(UNACCEPTABLE_HDWY)) |>
@@ -541,15 +568,13 @@ headway_tsp_model <- glm(UNACCEPTABLE_HDWY ~ TSP_Type,
 
 summary(headway_tsp_model)
 ```
-The coefficient for all 3 TSP types is negative, which indicates that each type of TSP reduces the likelihood that a ride will have unacceptable headway. However, the coefficient for TSP off is also negative, suggesting that turning TSP off also reduces the likelihood that a ride will have unacceptable headway.
-
 Using alpha=0.05, only the coefficient for TSP unconditional is statistically significant. 
 
 ```{r}
 pred_data_headway_tsp_model = tibble(TSP_Type=c('TSP Off', 'TSP Schedule-Conditional', 'TSP Unconditional', 'TSP Headway-Conditional'))
-pred_data_headway_tsp_model$Excessiv_Headway_Prob_Est = predict(headway_tsp_model, newdata=pred_data_headway_tsp_model, type="response")
+pred_data_headway_tsp_model$Excessive_Headway_Prob_Est = predict(headway_tsp_model, newdata=pred_data_headway_tsp_model, type="response")
 
-pred_data_lateness_tsp_model
+pred_data_headway_tsp_model
 ```
 When TSP is off, the model estimates an 8.3% chance of a bus having unacceptable headway.
 For unconditional TSP, the model estimates a 7% chance of a bus having unacceptable headway.
@@ -560,14 +585,42 @@ For 'Schedule Conditional' TSP, the model estimates a 8.8% chance of a bus havin
 pred_data_headway_tsp_model |> 
   mutate(TSP_Type = c('TSP_OFF', 'TSP_UNCOND', 'TSP_HEAD_COND', 'TSP_SCHED_COND')) |>
   mutate(TSP_Type = factor(TSP_Type, levels=c('TSP_OFF','TSP_SCHED_COND','TSP_UNCOND', 'TSP_HEAD_COND'), labels=c('TSP Off', 'TSP Schedule-Conditional', 'TSP Unconditional', 'TSP Headway-Conditional'))) |>
-  ggplot(aes(x=TSP_Type, y=Excessiv_Headway_Prob_Est)) +
+  ggplot(aes(x=TSP_Type, y=Excessive_Headway_Prob_Est)) +
   geom_col(fill='blue') +
   labs(title = "Logistic Regression Predicted Probability of Excessive Headway by TSP Type",
        subtitle = "For WeGo Bus Rides, 1/1/2023 - 5/12/2025",
   y = "Estimated Probability of Excessive Headway", x = "TSP Type")
 ```
 
-Next Steps:
--Create additional regression models incorporating things like time of day, day of week, etc.
--Create model analyzing effect of TSP being triggered on subsequent headway 
--Ask Michael about most effective visualization in this case (log model for categorical explanatory and response variable)
+```{r}
+headway_everything_tsp_model <- glm(UNACCEPTABLE_HDWY ~ TSP_Type + TIME_OF_DAY + DAY_OF_WEEK + SCHOOL_IN_SESSION,
+  data = tsp_lateness_model_data,
+  family = "binomial"
+)
+
+AIC(headway_everything_tsp_model)
+```
+
+```{r}
+# Applying Bonferroni correction
+headway_everything_tsp_model_coefficients <- tidy(headway_everything_tsp_model) |> 
+  mutate(p.value = p.adjust(p.value, method = "bonferroni"))
+
+headway_everything_tsp_model_coefficients |>
+  rename(Term = term, Coefficient = estimate, `P-Value` = `p.value`) |>
+  select(Term, Coefficient, `P-Value`)
+```
+# Take e to the power of the coefficient to obtain the odds ratio
+```{r}
+sched_cond_coef <- headway_everything_tsp_model_coefficients |> filter(term=='TSP_TypeTSP Schedule-Conditional') |> select(estimate) |> pull()
+hdwy_cond_coef <- headway_everything_tsp_model_coefficients |> filter(term=='TSP_TypeTSP Headway-Conditional') |> select(estimate) |> pull()
+uncond_coef <- headway_everything_tsp_model_coefficients |> filter(term=='TSP_TypeTSP Unconditional') |> select(estimate) |> pull()
+
+sched_cond_odds_ratio <- exp(sched_cond_coef)
+hdwy_cond_odds_ratio <- exp(hdwy_cond_coef)
+uncond_odds_ratio <- exp(uncond_coef)
+
+paste('Unconditional TSP reduces the odds of a bus having unacceptable headway by a factor of',round(uncond_odds_ratio, digits=3))
+paste('Schedule-conditional TSP increases the odds of a bus having unacceptable headway by a factor of',round(sched_cond_odds_ratio, digits=3))
+paste('Headway-conditional TSP reduces the odds of a bus having unacceptable headway by a factor of',round(hdwy_cond_odds_ratio, digits=3))
+```
