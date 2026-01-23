@@ -1,0 +1,407 @@
+<!-- FILTER CRITERIA: 1) TIME/DATE,  -->
+<!-- 2) Route portion (CH46, 28&CHARL, MCC5_1) -->
+<!-- TSP condition column: on/off (0/1) -->
+<!-- TSP off= Anything before 02-03-2025 is TSP OFF -->
+<!-- TSP on= 2025-02-03 12pm to 2025-02-10 12pm  -->
+<!-- TSP ON [schedlue Cond]= 2025-02-10 12 pm to 2025-04-28 -->
+<!-- TSP OFF= 2025-04-28 12pm to 2025-05-05 12pm  -->
+<!-- TSP ON= 2025-05-05 12pm to 2025-05-12 at 12pm -->
+<!-- TSP on [headway cond]= 2025-05-12 12pm to CURRENT/LAST DATE -->
+
+
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+
+library(tidyverse)
+library(lubridate)
+library(broom)
+
+
+wego <- read_csv("../data/Route 50 Timepoint and Headway Data, 1-1-2023 through 5-12-2025.csv")
+```
+
+
+# Filtering the stops
+```{r}
+wego_time_point_filter <- wego |> 
+  group_by(CALENDAR_ID,TRIP_ID) |> 
+  filter(all (c("WHBG", "MCC5_1") %in% TIME_POINT_ABBR)) |> #keep the group only if the both stops exist
+  filter(
+    ROUTE_STOP_SEQUENCE >= min(ROUTE_STOP_SEQUENCE[TIME_POINT_ABBR %in% c("WHBG", "MCC5_1")]) & #TIME_POINT_ABBR %in% c("WHBG", "MCC5_2") crates a logical vector (true,false) for each group Route_stop_seq with brackets selects the values where the condition is true.
+    ROUTE_STOP_SEQUENCE <= max(ROUTE_STOP_SEQUENCE[TIME_POINT_ABBR %in% c("WHBG", "MCC5_1")])
+  ) |> 
+  
+  filter(!(TIME_POINT_ABBR == "WHBG"  & ROUTE_DIRECTION_NAME == "TO DOWNTOWN"), #excluding the "WHBG" while going "To Downtown"
+         !(TIME_POINT_ABBR == "MCC5_1" & ROUTE_DIRECTION_NAME == "FROM DOWNTOWN")) |> #excluding the "MCC5_2" while "FROM Downtown"
+  ungroup()
+
+```
+			
+
+# Extract the correct schedule time 
+```{r}
+wego_time_point_filter <- wego_time_point_filter |> 
+  mutate(
+    SCHEDULED_TIME = case_when(str_sub(SCHEDULED_TIME, 1, 4) == '1900' ~ str_sub(SCHEDULED_TIME, 12,-1),
+    .default = SCHEDULED_TIME)) |>
+   mutate(HOUR = hour(hms(SCHEDULED_TIME))) 
+```
+
+
+# Combining date and scheduled_time into a single column
+```{r}
+wego_time_point_filter <- wego_time_point_filter |> 
+  filter((!is.na(DATE)) & (!is.na(SCHEDULED_TIME))) |> 
+  mutate(
+    #sched_time_clean = str_extract(SCHEDULED_TIME, "\\d{2}:\\d{2}:\\d{2}"),  #extract hms from SCHEDULED_TIME
+    date_time_str = paste(DATE, SCHEDULED_TIME, sep = " "),  #combine columns into a single character string(date_time_str)
+    datetime= ymd_hms(date_time_str) # Parse the character string into a POSIXct object
+  ) |> 
+  select(-date_time_str)
+``` 
+
+
+#calculating the headway percentage
+```{r}
+#TSP on [headway cond]= 2025-05-12 12pm to CURRENT/LAST DATE
+#TSP Headway-Conditional TSP Priority Begins (Only gapped buses with actual leading headway more than 120% of scheduled headway receive priority)
+
+  wego_time_point_filter <- wego_time_point_filter |> 
+  mutate(HDWY_DEV_Perc = ACTUAL_HDWY/SCHEDULED_HDWY * 100) |> 
+  filter(HDWY_DEV_Perc> 120) 
+```
+
+
+#case statement was running t00 slow , so created time variables to make it run fast
+```{r}
+t1 <- ymd_hms("2025-02-03 12:00:00")
+t2 <- ymd_hms("2025-02-10 12:00:00")
+t3 <- ymd_hms("2025-04-28 12:00:00")
+t4 <- ymd_hms("2025-05-05 12:00:00")
+t5 <- ymd_hms("2025-05-12 12:00:00")
+
+```
+
+
+# Create tsp Indicator variable for conditional and unconditional time phases
+```{r}
+wego_tsp <- wego_time_point_filter |> 
+  mutate(
+    tsp_phase = case_when(
+      
+#TSP on= 2025-02-03 12pm to 2025-02-10 12pm (unconditional)
+     
+   between(datetime,t1, t2) ~ 1,
+     
+     
+     
+#TSP ON [schedlue Cond]= 2025-02-10 12 pm to 2025-04-28 TSP  Priority Begins (Only buses more than 2 minutes late receive priority)
+    between(datetime,t2,t3)   ~ 1 ,  #filters for more than 2 mins late
+
+
+#TSP OFF= 2025-04-28 12pm to 2025-05-05 12pm
+    between(datetime,t3,t4) ~ 0,
+
+
+#TSP ON= 2025-05-05 12pm to 2025-05-12 at 12pm
+   between(datetime, t4, t5)   ~ 1,
+
+
+#TSP on [headway cond]= 2025-05-12 12pm to CURRENT/LAST DATE
+#TSP Headway-Conditional TSP Priority Begins (Only gapped buses with actual leading headway more than 120% of scheduled headway receive priority) 
+  
+  (datetime>t5)  ~ 1, 
+#filters for gapping (more hdwy than scheduled) and filter scheduled hdwy to not zero since it gives infinity values while calculating the hdwy percentage ~ 
+  
+  TRUE ~ 0)
+  ) 
+```
+
+
+**Main Research Question:**Does Transit Signal Priority (TSP) reduce the probability that a bus leaves a stop late?
+
+*Create a time_of_day column by using case_when to see how it effects the probability that bus leaves late
+
+early_morning: 4:00 - 5:59
+morning_peak: 6:00 - 8:59
+midday: 9:00 - 14:59
+pm_peak: 15:00 - 17:59
+evening: 18:00 - 20:59
+late_night: 21:00 - 1:59
+
+
+* Create Time Of day column for different time periods with labels
+```{r}
+wego_tsp <- wego_tsp |> 
+  
+  mutate(time_of_day =case_when(
+  between(hms(SCHEDULED_TIME),hms("4:00:00"),hms("5:59:00")) ~ "early_morning",
+  between(hms(SCHEDULED_TIME),hms("6:00:00"),hms("8:59:00")) ~ "morning_peak",
+  between(hms(SCHEDULED_TIME),hms("9:00:00"),hms("14:59:00")) ~ "midday",   
+  between(hms(SCHEDULED_TIME),hms("15:00:00"),hms("17:59:00")) ~ "pm_peak",
+  between(hms(SCHEDULED_TIME),hms("18:00:00"),hms("20:59:00")) ~ "evening",
+  hms(SCHEDULED_TIME)>=hms("21:00:00") | hms(SCHEDULED_TIME)<=hms("1:59:00") ~ "late_night",
+  between(hms(SCHEDULED_TIME),hms("2:00:00"),hms("3:59:00")) ~ "before_morning"))
+```
+
+
+* Create day of week and day type columns to see how it effects the probability that bus leaves late
+```{r}
+wego_tsp <- wego_tsp |> 
+  
+  mutate(day_of_week = wday(DATE,label = TRUE),
+         day_number = wday(DATE, week_start = 1),
+         day_type = if_else(day_number %in% c(6, 7), "Weekend", "Weekday")
+  ) |> 
+  select(-day_number)
+
+```
+
+
+* Create School session column to see how it effects the probability that bus leaves late
+```{r}
+wego_tsp <- wego_tsp |> 
+  mutate(
+    school_session = case_when(
+      between(ymd(DATE), ymd("2023-01-01"), ymd("2023-05-28")) ~ "In School" ,
+      between(ymd(DATE), ymd("2023-05-29"), ymd("2023-08-05")) ~ "Out School" ,
+      between(ymd(DATE), ymd("2023-08-06"), ymd("2024-05-28")) ~ "In School" ,
+      between(ymd(DATE), ymd("2024-05-29"), ymd("2024-08-05")) ~ "Out School" ,
+      between(ymd(DATE), ymd("2024-08-06"), ymd("2025-05-12")) ~ "In School"
+    )) 
+```
+
+
+* The TSP on and off proportion
+```{r}
+wego_tsp |>
+  count(tsp_phase) |>
+  mutate(
+    proportion = n / sum(n)
+  )
+```
+
+
+# Visualization of the effect of Tsp on Probability of bus being late
+```{r}
+wego_tsp |> 
+  group_by(tsp_phase) |> 
+  summarise(late_count = mean(ADJUSTED_LATE_COUNT)) |> 
+  ggplot(aes(x=factor(tsp_phase), y = late_count)) +
+  geom_col(fill=c("#FF6F68","#00B0BA"), width = 0.5)+
+  scale_x_discrete(labels= c("0" = "tsp off", "1"= "tsp on"))+
+  labs(x="Tsp Phase", y= "Probability of being late",
+       title = "Effect of Tsp on proportion of bus lateness")
+
+```
+
+
+```{r}
+wego_tsp$tsp_phase <- factor(wego_tsp$tsp_phase, levels=c(0,1), labels=c("tsp_off", "tsp_on"))
+```
+
+# visualization of  The probability of bus lateness by Time of Day and TSP Phase
+```{r}
+TSP_Time_of_day_plot <- wego_tsp |> 
+  group_by(time_of_day, tsp_phase) |> 
+  summarise(pc_late = mean(ADJUSTED_LATE_COUNT), .groups = "drop") |> 
+  ggplot(aes(x=time_of_day, y = pc_late, fill= factor(tsp_phase))) +
+  geom_col(position = position_dodge(width = 0.6),width = 0.5, na.rm =TRUE)+
+  scale_fill_manual(
+    values = c("tsp_off" = "#FF6F68", "tsp_on" = "#00B0BA"),
+    labels = c("TSP Off", "TSP On"),
+    name = "TSP Phase"
+  )+
+  #facet_wrap(~tsp_phase, labeller=as_labeller(c("0"="tsp off", "1"= "tsp on")))+
+  labs(x="Time of day", y= "Probability of bus being late",fill= "tsp_phase",
+       title = "The probability of bus lateness by Time of Day and TSP Phase")
+ggsave("TSP_Time_of_day_lateness_plot.png", width = 6, height = 3, dpi=300)
+```
+
+"Buses are less likely to be late when TSP is active, especially during peak times".
+
+
+#visualization of The probability of bus lateness by Day of Week and TSP Phase
+```{r}
+TSP_Day_of_week_plot <- wego_tsp |> 
+  group_by(day_of_week, tsp_phase) |> 
+  summarise(pc_late = mean(ADJUSTED_LATE_COUNT), .groups = "drop") |> 
+  ggplot(aes(x=day_of_week, y = pc_late, fill= factor(tsp_phase))) +
+  geom_col(position = position_dodge(width = 0.6),width = 0.5, na.rm =TRUE)+
+  scale_fill_manual(
+    values = c("tsp_off" = "#FF6F68", "tsp_on" = "#00B0BA"),
+    labels = c("TSP Off", "TSP On"),
+    name = "TSP Phase"
+  )+
+  #facet_wrap(~tsp_phase, labeller=as_labeller(c("0"="tsp off", "1"= "tsp on")))+
+  labs(x="Day of Week", y= "Probability of bus being late",fill= "tsp_phase",
+       title = "The probability of bus lateness by Day of Week and TSP Phase")
+ggsave("TSP_Day_of_week_lateness_plot.png", width = 6, height = 3, dpi=300)
+```
+
+* "Buses are less likely to be late when TSP is active, across most of the days in a week".
+* Sunday shows slightly higher lateness under TSP, it might be due to lower traffic.
+
+
+#Visualization of The probability of bus lateness by school session and TSP Phase
+```{r}
+TSP_School_session <- wego_tsp |> 
+  group_by(school_session, tsp_phase) |> 
+  summarise(pc_late = mean(ADJUSTED_LATE_COUNT), .groups = "drop") |> 
+  ggplot(aes(x=school_session, y = pc_late, fill= factor(tsp_phase))) +
+  geom_col(position = position_dodge(width = 0.3),width = 0.2, na.rm =TRUE)+
+  scale_fill_manual(
+    values = c("tsp_off" = "#FF6F68", "tsp_on" = "#00B0BA"),
+    labels = c("TSP Off", "TSP On"),
+    name = "TSP Phase"
+  )+
+  #facet_wrap(~tsp_phase, labeller=as_labeller(c("0"="tsp off", "1"= "tsp on")))+
+  labs(x="school session", y= "Probability of bus being late",fill= "tsp_phase",
+       title = "The probability of bus lateness by school session and TSP Phase")
+ggsave("TSP_School_session_lateness_plot.png", width = 6, height = 3, dpi=300)
+```
+
+* TSP was not active during out school sessions in this data set.
+* During in school sessions activating TSP reduces the Probability of bus being late.
+
+
+#Visualization of The probability of bus lateness by day type and TSP Phase
+```{r}
+wego_tsp |> 
+  group_by(day_type, tsp_phase) |> 
+  summarise(pc_late = mean(ADJUSTED_LATE_COUNT), .groups = "drop") |> 
+  ggplot(aes(x=day_type, y = pc_late, fill= factor(tsp_phase))) +
+  geom_col(position = position_dodge(width = 0.6),width = 0.5, na.rm =TRUE)+
+  scale_fill_manual(
+    values = c("tsp_off" = "#FF6F68", "tsp_on" = "#00B0BA"),
+    labels = c("TSP Off", "TSP On"),
+    name = "TSP Phase"
+  )+
+  #facet_wrap(~tsp_phase, labeller=as_labeller(c("0"="tsp off", "1"= "tsp on")))+
+  labs(x="Day Type", y= "Probability of bus being late",fill= "tsp_phase",
+       title = "The probability of bus lateness by day type and TSP Phase")
+```
+
+# Creating logistic regression model with target variable ADJUSTED_LATE_COUNT and predictor variable tsp_phase and control variables.
+```{r}
+lm_tsp_late <- glm(ADJUSTED_LATE_COUNT ~  tsp_phase + time_of_day + day_of_week + school_session +TIME_POINT_ABBR, data = wego_tsp, family="binomial")
+summary(lm_tsp_late)
+```
+```{r}
+lm_tsp_late_summary <- summary(lm_tsp_late) 
+lm_tsp_late_summary$coefficients[ ,c("Estimate","Pr(>|z|)")] 
+```
+
+```{r}
+coef_tsp <- coef(lm_tsp_late)["tsp_phasetsp_on"]
+odds_ratio <- exp(coef_tsp) #e^(-0.145194)
+odds_ratio
+```
+
+*In the logistic regression model the coefficient for TSP being on is -0.145194 and p-value 8.76e-06(p<0.05), indicating that activating TSP significantly reduces the likelihood of bus lateness.
+
+*Interpreted as an odds ratio, buses operating with TSP enabled have approximately 13.5% lower odds of bus being late compared to periods when TSP is off, controlling for time of day, day of week, school session and stop location.
+
+
+# Calculate the AIC of a model using different controlled variable and taking the less AIC value variable as controlled variables 
+```{r}
+lm_tsp_late_cv <- glm(ADJUSTED_LATE_COUNT ~  tsp_phase + school_session , data = wego_tsp, family="binomial")
+summary(lm_tsp_late_cv)
+```
+
+
+```{r}
+lm_tsp_late <- glm(ADJUSTED_LATE_COUNT ~  tsp_phase , data = wego_tsp, family="binomial")
+summary(lm_tsp_late)
+```
+
+```{r}
+aic_time_day <- AIC(lm_tsp_late_cv, lm_tsp_late)
+```
+
+```{r}
+aic_day_week <- AIC(lm_tsp_late_cv, lm_tsp_late)
+```
+
+```{r}
+aic_school <- AIC(lm_tsp_late_cv, lm_tsp_late)
+```
+
+*We fit various logistic regression models based on different combinations of these variables and chose the model with the lowest AIC
+
+
+#How much does the TSP reduce the average bus delay time?
+
+* Create a Linear regression model ADHERENCE as a target variable
+```{r}
+#ADHERENCE: Difference between actual departure time and scheduled time; negative indicates departure time after scheduled time and positive indicates departure time before scheduled time. Generally, on-time is considered to be no more than 6 minutes lates and no more than one minute early.
+
+
+lm_tsp_Adherence <- glm(ADHERENCE ~ tsp_phase +time_of_day + day_of_week + school_session +TIME_POINT_ABBR , data = wego_tsp)
+summary(lm_tsp_Adherence)
+
+```
+
+```{r}
+lm_tsp_Adherence_summary <- summary(lm_tsp_Adherence) 
+lm_tsp_Adherence_summary$coefficients[ ,c("Estimate","Pr(>|t|)")] 
+```
+
+
+* When TSP is activated, average bus schedule adherence improve by approximately 0.50 minutes(about 30 seconds), indicating reduced lateness.
+*The coefficient for TSP activation is statistically significant(p= 1.96×10^-6), showing that TSP has a significant association with bus schedule adherence after controlling other variables like Time of Day, Day of Week, School Session and stop location. 
+
+
+
+# Create a visualization Effect of TSP phase on Bus Lateness.
+```{r}
+mean_adherence <- wego_tsp |> 
+  group_by( tsp_phase) |> 
+  summarise(avg_Adherence= mean(ADHERENCE, na.rm =TRUE)) |> 
+  ungroup() |> 
+  mutate(tsp_phase = factor(tsp_phase, levels=c("tsp_off","tsp_on")))
+
+```
+
+```{r}
+  TSP_avg_lateness_plot <- ggplot(mean_adherence, aes(x=tsp_phase , y= -avg_Adherence, fill=tsp_phase))+
+  geom_col(width = 0.5)+
+  geom_label(
+    aes(label = round(avg_Adherence, 2)),
+     )+
+  scale_fill_manual(values = c("tsp_off"="#FF6F68", "tsp_on" ="#00B0BA")) +
+  labs(x="TSP Phase", 
+       y= "Average Lateness (minutes)",
+       title = "Effect of TSP phase on Bus Lateness",
+       subtitle = "higher values = more late",
+       fill = "tsp_phase")
+ggsave("TSP_Avg_lateness_plot.png", width = 6, height = 3, dpi=300)
+
+```
+
+
+
+* We can apply the Bonferroni correction to the p-values in our model since we had many explanatory variables.
+
+```{r}
+tidy(lm_tsp_Adherence) |>
+  mutate(p.value = p.adjust(p.value, method = "bonferroni"))
+```
+
+
+
+#Quality check
+```{r}
+wego_tsp |> 
+ group_by(time_of_day, tsp_phase) |> 
+ summarise(mean_late_count= mean(ADJUSTED_LATE_COUNT), avg_Adherence= mean(ADHERENCE, na.rm =TRUE))
+
+```
