@@ -310,7 +310,7 @@ wego |>
 ```
 
 
-We will also investigate the effect of TSP on headway. The generally accepted range of headway deviation is 50% to 150% of the scheduled headway. We'll create a couple new columns to analyze this.
+We will also investigate the effect of TSP on headway. The generally accepted range of headway deviation is 50% to 150% of the scheduled headway. We'll create a new "UNACCEPTABLE_HDWY" column to represent this.
 ```{r}
 wego <- wego |>
   mutate(HDWY_DEV_PCT = 100*HDWY_DEV/SCHEDULED_HDWY,
@@ -424,10 +424,10 @@ wego |>
   y = "Late Status", x = "TSP Type")
 ```
 
-We will explore whether headway is affected by day of week, time of day, or time of year.
+We will explore whether headway is affected by day of week, time of day, or time of year (outside of TSP).
 ```{r}
 headway_by_weekday <- wego |>
-  filter(!is.na(UNACCEPTABLE_HDWY)) |>
+  filter(!is.na(UNACCEPTABLE_HDWY) & TSP_OFF==1) |>
   ggplot(aes(x=DAY_OF_WEEK, fill=UNACCEPTABLE_HDWY)) +
   geom_bar(position='fill') +
   coord_flip() +
@@ -443,7 +443,7 @@ ggsave("headway_by_weekday.png", plot = headway_by_weekday, width = 6, height = 
 
 ```{r}
 headway_by_timeofday <- wego |>
-  filter(!is.na(UNACCEPTABLE_HDWY)) |>
+  filter(!is.na(UNACCEPTABLE_HDWY) & TSP_OFF==1) |>
   ggplot(aes(x=TIME_OF_DAY, fill=UNACCEPTABLE_HDWY)) +
   geom_bar(position='fill') +
   coord_flip() +
@@ -459,7 +459,7 @@ ggsave("headway_by_timeofday.png", plot = headway_by_timeofday, width = 6, heigh
 
 ```{r}
 headway_by_schoolstatus <- wego |>
-  filter(!is.na(UNACCEPTABLE_HDWY)) |>
+  filter(!is.na(UNACCEPTABLE_HDWY) & TSP_OFF==1) |>
   ggplot(aes(x=SCHOOL_IN_SESSION, fill=UNACCEPTABLE_HDWY)) +
   geom_bar(position='fill') +
   coord_flip() +
@@ -471,7 +471,6 @@ headway_by_schoolstatus
 
 ggsave("headway_by_schoolstatus.png", plot = headway_by_schoolstatus, width = 6, height = 4, units = "in")
 ```
-It appears that time of day has the greatest variation in headway. We'll incorporate that into our model.
 
 # Statistical Models --------------------------------------------------------------------------------------------------------
 
@@ -512,7 +511,7 @@ pred_data_lateness_tsp_model |>
   y = "Estimated Probability of Lateness", x = "TSP Type")
 ```
 
-Let's see how adding explanatory variables for day of week, time of day, and time of year changes the model.
+Let's see how adding explanatory variables for day of week, time of day, and whether school is in session changes the model.
 
 ```{r}
 lateness_everything_tsp_model <- glm(ADJUSTED_LATE_COUNT ~ TSP_Type + TIME_OF_DAY + SCHOOL_IN_SESSION + DAY_OF_WEEK,
@@ -522,6 +521,8 @@ lateness_everything_tsp_model <- glm(ADJUSTED_LATE_COUNT ~ TSP_Type + TIME_OF_DA
 
 AIC(lateness_everything_tsp_model)
 ```
+The AIC decreases when we add explanatory variables for day of week, time of day, and whether or not school is in session, indicating these variables improve our model.
+
 ```{r}
 # Applying Bonferroni correction
 lateness_everything_tsp_model_coefficients <- tidy(lateness_everything_tsp_model) |>
@@ -591,7 +592,7 @@ pred_data_headway_tsp_model |>
        subtitle = "For WeGo Bus Rides, 1/1/2023 - 5/12/2025",
   y = "Estimated Probability of Excessive Headway", x = "TSP Type")
 ```
-
+The model for headway that includes TSP type, time of day, day of week, and whether school is in session or not results in the lowest AIC.
 ```{r}
 headway_everything_tsp_model <- glm(UNACCEPTABLE_HDWY ~ TSP_Type + TIME_OF_DAY + DAY_OF_WEEK + SCHOOL_IN_SESSION,
   data = tsp_lateness_model_data,
@@ -602,6 +603,7 @@ AIC(headway_everything_tsp_model)
 ```
 
 ```{r}
+# Convert from scientific notation to decimal notation
 options(scipen = 999)
 
 # Applying Bonferroni correction
